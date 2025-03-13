@@ -1,19 +1,27 @@
 #include <WiFi.h>
 #include <WebServer.h>
 
+// Parameters for access point mode
+const char *apSSID = "ESP32_NETWORK";  // Network name in access point mode
+const char *apPassword = "12345678";   // Network password in access point mode
+
+// Parameters for connecting to an existing Wi-Fi network
 const char* ssid = "&&";  
 const char* password = "&&";
 
-// Пины для кнопок
-const int BUTTON_RESET_ESP = 14;     // Кнопка для перезагрузки ESP32
-const int BUTTON_RESET_SCRIPT = 12;  // Кнопка для перезагрузки скрипта на сервере
-const int BUTTON_KILL_PROCESS = 13;  // Кнопка для убийства процесса
+// Operating mode: true - access point, false - Wi-Fi connection
+const bool ACCESS_POINT_MODE = true;
+
+// Pins for buttons
+const int BUTTON_RESET_ESP = 14;     // Button for rebooting ESP32
+const int BUTTON_RESET_SCRIPT = 12;  // Button for restarting the script on the server
+const int BUTTON_KILL_PROCESS = 13;  // Button for killing a process
 
 WebServer server(80);
-String lastMessage = "No data yet";  // Последнее сообщение от сервера
-bool resetScriptRequest = false;     // Флаг запроса перезагрузки скрипта
-bool killProcessRequest = false;     // Флаг запроса убийства процесса
-String processToKill = "";           // Имя процесса для убийства
+String lastMessage = "No data yet";  // Last message from the server
+bool resetScriptRequest = false;     // Flag for script restart request
+bool killProcessRequest = false;     // Flag for process kill request
+String processToKill = "";           // Name of the process to be killed
 
 void handleRoot() {
   Serial.println("[DEBUG] HTTP GET / request received.");
@@ -23,20 +31,20 @@ void handleRoot() {
 void handlePost() {
   Serial.println("[DEBUG] HTTP POST / request received.");
   if (server.hasArg("plain")) {
-    lastMessage = server.arg("plain");  // Сохраняем сообщение
+    lastMessage = server.arg("plain");  // Store the received message
     Serial.println("[DEBUG] Received from server: " + lastMessage);
     
-    // Отправляем текущие флаги управления в ответе
+    // Send the current control flags in response
     String response = "Data received";
     if (resetScriptRequest) {
       response += "|RESET_SCRIPT";
-      resetScriptRequest = false;  // Сбрасываем флаг после отправки
-      Serial.println("[DEBUG] Отправлен запрос на перезагрузку скрипта");
+      resetScriptRequest = false;  // Reset the flag after sending
+      Serial.println("[DEBUG] Script restart request sent");
     }
     if (killProcessRequest) {
       response += "|KILL_PROCESS|" + processToKill;
-      killProcessRequest = false;  // Сбрасываем флаг после отправки
-      Serial.println("[DEBUG] Отправлен запрос на убийство процесса: " + processToKill);
+      killProcessRequest = false;  // Reset the flag after sending
+      Serial.println("[DEBUG] Process kill request sent: " + processToKill);
       processToKill = "";
     }
     
@@ -47,26 +55,37 @@ void handlePost() {
   }
 }
 
-// Функция для получения списка процессов и выбора первого для убийства
+// Function for handling incoming data at the /send endpoint
+void handleData() {
+  if (server.hasArg("plain")) {
+    String data = server.arg("plain");
+    Serial.println("[DEBUG] Received Data at /send: " + data);
+    server.send(200, "text/plain", "Data received!");
+  } else {
+    server.send(400, "text/plain", "No data received");
+  }
+}
+
+// Function to get a list of processes and select the first one to kill
 void handleKillProcess() {
-  // Используем информацию о топовых процессах из lastMessage
+  // Use information about top processes from lastMessage
   if (lastMessage.indexOf("Top CPU:") >= 0) {
     int start = lastMessage.indexOf("Top CPU:") + 9;
     int end = lastMessage.indexOf(",", start);
     if (end < 0) end = lastMessage.length();
     
     String topProcess = lastMessage.substring(start, end);
-    // Извлекаем имя процесса (без процентов)
+    // Extract process name (without percentages)
     int bracketPos = topProcess.indexOf("(");
     if (bracketPos > 0) {
       processToKill = topProcess.substring(0, bracketPos);
       killProcessRequest = true;
-      Serial.println("[DEBUG] Выбран процесс для убийства: " + processToKill);
+      Serial.println("[DEBUG] Selected process to kill: " + processToKill);
     } else {
-      Serial.println("[ERROR] Не удалось извлечь имя процесса из данных");
+      Serial.println("[ERROR] Failed to extract process name from data");
     }
   } else {
-    Serial.println("[ERROR] Нет данных о процессах");
+    Serial.println("[ERROR] No process data available");
   }
 }
 
@@ -74,25 +93,38 @@ void setup() {
   Serial.begin(115200);
   Serial.println("[DEBUG] Starting up...");
 
-  // Настраиваем пины кнопок как входы с подтяжкой к питанию
+  // Configure button pins as inputs with pull-up resistors
   pinMode(BUTTON_RESET_ESP, INPUT_PULLUP);
   pinMode(BUTTON_RESET_SCRIPT, INPUT_PULLUP);
   pinMode(BUTTON_KILL_PROCESS, INPUT_PULLUP);
   
   Serial.println("[DEBUG] Buttons initialized.");
 
-  WiFi.begin(ssid, password);
-  Serial.print("[DEBUG] Connecting to WiFi");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
+  // Start WiFi based on selected mode
+  if (ACCESS_POINT_MODE) {
+    // Access Point (AP) mode
+    WiFi.softAP(apSSID, apPassword);
+    Serial.println("[DEBUG] WiFi AP started!");
+    Serial.print("[DEBUG] ESP32 AP IP: ");
+    Serial.println(WiFi.softAPIP());
+  } else {
+    // Client mode (connecting to an existing network)
+    WiFi.begin(ssid, password);
+    Serial.print("[DEBUG] Connecting to WiFi");
+    while (WiFi.status() != WL_CONNECTED) {
+      delay(500);
+      Serial.print(".");
+    }
+    
+    Serial.println("\n[DEBUG] Connected to Wi-Fi!");
+    Serial.println("[DEBUG] ESP32 IP: " + WiFi.localIP().toString());
   }
   
-  Serial.println("\n[DEBUG] Connected to Wi-Fi!");
-  Serial.println("[DEBUG] ESP32 IP: " + WiFi.localIP().toString());
-  
+  // Set up HTTP request handlers
   server.on("/", HTTP_GET, handleRoot);
   server.on("/", HTTP_POST, handlePost);
+  server.on("/send", HTTP_POST, handleData);
+  
   server.begin();
   Serial.println("[DEBUG] HTTP server started.");
 }
@@ -100,30 +132,30 @@ void setup() {
 void loop() {
   server.handleClient();
 
-  // Проверяем кнопку перезагрузки ESP32
+  // Check ESP32 reset button
   if (digitalRead(BUTTON_RESET_ESP) == LOW) {
-    Serial.println("[DEBUG] Кнопка перезагрузки ESP32 нажата. Перезагрузка...");
-    delay(500);  // Дебаунс
-    ESP.restart();  // Перезагрузка ESP32
+    Serial.println("[DEBUG] ESP32 reset button pressed. Restarting...");
+    delay(500);  // Debounce
+    ESP.restart();  // Restart ESP32
   }
   
-  // Проверяем кнопку перезагрузки скрипта
+  // Check script restart button
   if (digitalRead(BUTTON_RESET_SCRIPT) == LOW) {
-    Serial.println("[DEBUG] Кнопка перезагрузки скрипта нажата.");
-    delay(500);  // Дебаунс
-    resetScriptRequest = true;  // Устанавливаем флаг для следующего ответа на POST запрос
-    Serial.println("[DEBUG] Запрос на перезапуск скрипта установлен.");
+    Serial.println("[DEBUG] Script restart button pressed.");
+    delay(500);  // Debounce
+    resetScriptRequest = true;  // Set flag for next POST request response
+    Serial.println("[DEBUG] Script restart request set.");
   }
   
-  // Проверяем кнопку убийства процесса
+  // Check process kill button
   if (digitalRead(BUTTON_KILL_PROCESS) == LOW) {
-    Serial.println("[DEBUG] Кнопка убийства процесса нажата.");
-    delay(500);  // Дебаунс
-    handleKillProcess();  // Обрабатываем запрос на убийство процесса
+    Serial.println("[DEBUG] Process kill button pressed.");
+    delay(500);  // Debounce
+    handleKillProcess();  // Handle process kill request
   }
 
-  // Выводим последнее полученное сообщение каждые 5 секунд
-  static unsigned long lastMillis = 0;
+  // Print the last received message every 5 seconds
+  static unsigned long lastMillis = 0;  
   if (millis() - lastMillis >= 5000) {
     lastMillis = millis();
     Serial.println("[INFO] Last received data: " + lastMessage);
