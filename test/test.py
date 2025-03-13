@@ -5,226 +5,48 @@ import os
 import sys
 import signal
 import subprocess
-import socket
-import platform
-import json
-import ipaddress
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+import argparse
 
-print("\n==================================================")
-print("ESP32 Monitor Client - Enhanced Discovery Version")
-print("==================================================\n")
+# Параметры для подключения к ESP32
+ESP32_AP_IP = "192.168.4.1"  # IP ESP32 в режиме точки доступа
+ESP32_STATION_IP = "192.168.1.33"  # IP ESP32 в режиме клиента WiFi
 
-print("[DEBUG] Скрипт сервера запущен")
+# Парсер аргументов командной строки
+parser = argparse.ArgumentParser(description='Скрипт для взаимодействия с ESP32')
+parser.add_argument('--ap', action='store_true', help='Использовать IP для режима точки доступа')
+parser.add_argument('--ip', type=str, help='Указать произвольный IP адрес ESP32')
+parser.add_argument('--simple', action='store_true', help='Запустить простую отправку данных без мониторинга')
+parser.add_argument('--message', type=str, default="Hello from Python!", help='Сообщение для отправки в простом режиме')
+args = parser.parse_args()
+
+# Определяем IP адрес ESP32 и URL для запросов
+if args.ip:
+    ESP32_IP = args.ip
+elif args.ap:
+    ESP32_IP = ESP32_AP_IP
+else:
+    ESP32_IP = ESP32_STATION_IP
+
+# URL для запросов
+ESP32_URL = f"http://{ESP32_IP}/"
+ESP32_SEND_URL = f"http://{ESP32_IP}/send"
+
+print(f"[DEBUG] Скрипт запущен, используется IP: {ESP32_IP}")
 print(f"[DEBUG] PID скрипта: {os.getpid()}")
-print(f"[DEBUG] Время запуска: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-# Глобальные параметры
-ESP32_HOSTNAME = "esp32monitor.local"  # Имя mDNS
-ESP32_IP = None  # Будет установлен после обнаружения
-ESP32_URL = None  # Будет установлен после обнаружения
-DISCOVERY_TIMEOUT = 1  # Таймаут для каждого запроса обнаружения (секунды)
-MAX_DISCOVERY_WORKERS = 50  # Максимальное количество потоков для сканирования
-CONFIG_FILE = "esp32_monitor_config.json"  # Файл для сохранения настроек
-
-# Сохранение и загрузка конфигурации для запоминания IP адреса
-def save_config(ip):
-    """Сохраняет IP адрес в конфигурационный файл"""
+def send_simple_message(message):
+    """Отправляет простое сообщение на ESP32"""
     try:
-        with open(CONFIG_FILE, 'w') as f:
-            json.dump({"esp32_ip": ip, "last_update": datetime.now().strftime('%Y-%m-%d %H:%M:%S')}, f)
-        print(f"[DEBUG] IP {ip} сохранен в конфигурационном файле")
+        print(f"[DEBUG] Отправка сообщения: {message}")
+        response = requests.post(ESP32_SEND_URL, data=message)
+        print(f"[DEBUG] Ответ ESP32: {response.text}")
+        return True
     except Exception as e:
-        print(f"[WARNING] Не удалось сохранить конфигурацию: {e}")
-
-def load_config():
-    """Загружает IP адрес из конфигурационного файла"""
-    try:
-        if os.path.exists(CONFIG_FILE):
-            with open(CONFIG_FILE, 'r') as f:
-                config = json.load(f)
-                ip = config.get("esp32_ip")
-                last_update = config.get("last_update", "неизвестно")
-                print(f"[DEBUG] Загружен сохраненный IP {ip} (последнее обновление: {last_update})")
-                return ip
-        return None
-    except Exception as e:
-        print(f"[WARNING] Не удалось загрузить конфигурацию: {e}")
-        return None
-
-# Определение локальных интерфейсов для более точного сканирования
-def get_local_interfaces():
-    """Получает список локальных IP интерфейсов с их подсетями"""
-    interfaces = []
-    try:
-        # Для Linux/Mac
-        if platform.system() != "Windows":
-            import netifaces
-            for interface in netifaces.interfaces():
-                addrs = netifaces.ifaddresses(interface)
-                if netifaces.AF_INET in addrs:
-                    for addr in addrs[netifaces.AF_INET]:
-                        ip = addr['addr']
-                        if ip != '127.0.0.1':
-                            netmask = addr.get('netmask', '255.255.255.0')
-                            network = ipaddress.IPv4Network(f"{ip}/{netmask}", strict=False)
-                            interfaces.append({
-                                'ip': ip, 
-                                'network': str(network.network_address), 
-                                'prefix': network.prefixlen
-                            })
-        else:
-            # Для Windows используем упрощенный метод
-            hostname = socket.gethostname()
-            for ip in socket.gethostbyname_ex(hostname)[2]:
-                if ip != '127.0.0.1':
-                    interfaces.append({
-                        'ip': ip, 
-                        'network': ip.rsplit('.', 1)[0] + '.0', 
-                        'prefix': 24
-                    })
-    except Exception as e:
-        print(f"[WARNING] Ошибка при получении сетевых интерфейсов: {e}")
-        # Добавляем стандартные сети для мобильных точек доступа
-        interfaces.append({'ip': '192.168.43.1', 'network': '192.168.43.0', 'prefix': 24})  # Android
-        interfaces.append({'ip': '172.20.10.1', 'network': '172.20.10.0', 'prefix': 24})   # iPhone
-    
-    if not interfaces:
-        # Добавляем стандартные сети если не найдено ни одного интерфейса
-        interfaces.append({'ip': '192.168.0.1', 'network': '192.168.0.0', 'prefix': 24})    # Обычные роутеры
-        interfaces.append({'ip': '192.168.1.1', 'network': '192.168.1.0', 'prefix': 24})    # Обычные роутеры
-        interfaces.append({'ip': '192.168.43.1', 'network': '192.168.43.0', 'prefix': 24})  # Android
-        interfaces.append({'ip': '172.20.10.1', 'network': '172.20.10.0', 'prefix': 24})   # iPhone
-    
-    return interfaces
-
-# Функция для проверки одного IP адреса
-def check_ip(ip, port=80):
-    """Проверяет, является ли указанный IP адрес ESP32 устройством"""
-    try:
-        url = f"http://{ip}:{port}/discovery"
-        response = requests.get(url, timeout=DISCOVERY_TIMEOUT)
-        if response.status_code == 200 and "ESP32_MONITOR_DEVICE" in response.text:
-            print(f"[SUCCESS] Найдено ESP32 устройство на IP: {ip}")
-            return ip
-        
-        # Проверяем корневой маршрут, если /discovery не отвечает
-        url = f"http://{ip}:{port}/"
-        response = requests.get(url, timeout=DISCOVERY_TIMEOUT)
-        if response.status_code == 200 and "ESP32_MONITOR_DEVICE" in response.text:
-            print(f"[SUCCESS] Найдено ESP32 устройство на IP: {ip}")
-            return ip
-    except:
-        pass
-    return None
-
-# Функция сканирования диапазона IP-адресов в отдельном потоке
-def scan_ip_range(network, prefix):
-    """Сканирует диапазон IP адресов для поиска ESP32"""
-    try:
-        network = ipaddress.IPv4Network(f"{network}/{prefix}", strict=False)
-        found_ip = None
-        
-        # Создаем список всех IP в сети для сканирования
-        # Ограничиваем до 254 адресов для больших сетей
-        hosts = list(network.hosts())
-        if len(hosts) > 254:
-            hosts = hosts[:254]
-        
-        print(f"[DEBUG] Сканирование сети {network} ({len(hosts)} адресов)...")
-        
-        # Используем пул потоков для параллельного сканирования
-        with ThreadPoolExecutor(max_workers=MAX_DISCOVERY_WORKERS) as executor:
-            results = list(executor.map(check_ip, [str(ip) for ip in hosts]))
-            
-        # Фильтруем None результаты
-        found_ips = [ip for ip in results if ip]
-        if found_ips:
-            return found_ips[0]  # Возвращаем первый найденный IP
-        
-        return None
-    except Exception as e:
-        print(f"[ERROR] Ошибка при сканировании сети {network}/{prefix}: {e}")
-        return None
-
-# Функция для попытки подключения по mDNS
-def try_mdns_connection():
-    """Пытается подключиться к ESP32 по mDNS имени"""
-    try:
-        print(f"[DEBUG] Попытка подключения по mDNS: {ESP32_HOSTNAME}")
-        response = requests.get(f"http://{ESP32_HOSTNAME}/", timeout=3)
-        if response.status_code == 200:
-            print(f"[SUCCESS] Успешное подключение по mDNS!")
-            return ESP32_HOSTNAME
-    except Exception as e:
-        print(f"[DEBUG] Не удалось подключиться по mDNS: {e}")
-    return None
-
-# Основная функция обнаружения ESP32
-def discover_esp32():
-    """Обнаруживает ESP32 в сети используя несколько методов"""
-    global ESP32_IP, ESP32_URL
-    
-    print("\n[DEBUG] Запуск процесса обнаружения ESP32...")
-    
-    # Шаг 1: Пробуем загрузить сохраненный IP
-    saved_ip = load_config()
-    if saved_ip:
-        print(f"[DEBUG] Проверка сохраненного IP: {saved_ip}")
-        if check_ip(saved_ip):
-            ESP32_IP = saved_ip
-            ESP32_URL = f"http://{ESP32_IP}/"
-            print(f"[SUCCESS] Подключение установлено с сохраненным IP: {ESP32_IP}")
-            return ESP32_URL
-    
-    # Шаг 2: Пробуем mDNS
-    mdns_result = try_mdns_connection()
-    if mdns_result:
-        ESP32_IP = mdns_result
-        ESP32_URL = f"http://{ESP32_IP}/"
-        return ESP32_URL
-    
-    # Шаг 3: Сканируем локальные сети
-    interfaces = get_local_interfaces()
-    print(f"[DEBUG] Обнаружено {len(interfaces)} сетевых интерфейсов для сканирования")
-    
-    for interface in interfaces:
-        print(f"[DEBUG] Сканирование сети: {interface['network']}/{interface['prefix']} (интерфейс: {interface['ip']})")
-        found_ip = scan_ip_range(interface['network'], interface['prefix'])
-        if found_ip:
-            ESP32_IP = found_ip
-            ESP32_URL = f"http://{ESP32_IP}/"
-            # Сохраняем найденный IP
-            save_config(ESP32_IP)
-            return ESP32_URL
-    
-    # Шаг 4: Проверяем общие диапазоны IP для мобильных точек доступа
-    common_networks = [
-        "192.168.43.0/24",  # Android
-        "172.20.10.0/24",   # iPhone
-        "192.168.1.0/24",   # Обычные роутеры
-        "192.168.0.0/24",   # Обычные роутеры
-        "10.0.0.0/24"       # Некоторые офисные сети
-    ]
-    
-    for network in common_networks:
-        net, prefix = network.split('/')
-        if not any(net == interface['network'] and int(prefix) == interface['prefix'] for interface in interfaces):
-            print(f"[DEBUG] Сканирование дополнительной сети: {network}")
-            found_ip = scan_ip_range(net, int(prefix))
-            if found_ip:
-                ESP32_IP = found_ip
-                ESP32_URL = f"http://{ESP32_IP}/"
-                # Сохраняем найденный IP
-                save_config(ESP32_IP)
-                return ESP32_URL
-    
-    print("[ERROR] ESP32 не обнаружен в сети. Проверьте подключение.")
-    # Возвращаем запасной вариант
-    return "http://esp32monitor.local/"
+        print(f"[ERROR] Ошибка при отправке сообщения: {e}")
+        return False
 
 def get_system_stats():
+    """Собирает статистику о системе"""
     cpu_load = psutil.cpu_percent(interval=1)  # Загруженность CPU в процентах
     memory_info = psutil.virtual_memory()  # Информация о памяти
     memory_usage = memory_info.percent  # Использование памяти в процентах
@@ -270,27 +92,18 @@ def restart_script():
     python = sys.executable
     os.execl(python, python, *sys.argv)
 
-# Основная функция
-def main():
-    global ESP32_URL
+def run_monitoring_loop():
+    """Основной цикл мониторинга системы и взаимодействия с ESP32"""
+    print("[DEBUG] Запуск цикла мониторинга")
+    running = True
     
-    # Обнаружение ESP32
-    ESP32_URL = discover_esp32()
-    print(f"[INFO] Используем URL для подключения к ESP32: {ESP32_URL}")
-    
-    connection_failures = 0
-    max_failures = 5
-    
-    while True:
+    while running:
         try:
+            # Получаем и отправляем статистику системы
             data = get_system_stats()
             print(f"[DEBUG] Отправка данных: {data}")
-            
-            response = requests.post(ESP32_URL, headers={"Content-Type": "text/plain"}, data=data, timeout=5)
+            response = requests.post(ESP32_URL, headers={"Content-Type": "text/plain"}, data=data)
             print(f"[DEBUG] Ответ ESP32: {response.text}")
-            
-            # Сброс счетчика ошибок при успешном подключении
-            connection_failures = 0
             
             # Проверяем ответ на наличие команд
             if "|RESET_SCRIPT" in response.text:
@@ -305,25 +118,20 @@ def main():
                     kill_process(process_name)
             
         except Exception as e:
-            print(f"[ERROR] Ошибка соединения: {e}")
-            connection_failures += 1
-            
-            if connection_failures >= max_failures:
-                print(f"[WARNING] {connection_failures} неудачных попыток подряд. Запуск переобнаружения ESP32...")
-                ESP32_URL = discover_esp32()
-                connection_failures = 0
-            
-            print(f"[DEBUG] Пауза перед следующей попыткой ({connection_failures}/{max_failures})...")
-            time.sleep(5)  # Пауза между попытками переподключения
+            print(f"[ERROR] Ошибка в цикле мониторинга: {e}")
         
         time.sleep(5)  # Отправлять данные каждые 5 секунд
 
+# Главная логика скрипта
 if __name__ == "__main__":
     try:
-        main()
+        if args.simple:
+            # Режим простой отправки сообщения
+            send_simple_message(args.message)
+        else:
+            # Режим мониторинга системы
+            run_monitoring_loop()
     except KeyboardInterrupt:
-        print("\n[INFO] Скрипт остановлен пользователем")
+        print("[DEBUG] Скрипт остановлен пользователем")
     except Exception as e:
-        print(f"[FATAL] Неожиданная ошибка: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"[ERROR] Критическая ошибка: {e}")
