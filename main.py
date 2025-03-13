@@ -9,7 +9,7 @@ import argparse
 
 # Parameters for connecting to ESP32
 ESP32_AP_IP = "192.168.4.1"  # ESP32 IP in access point mode
-ESP32_STATION_IP = "192.168.1.33"  # ESP32 IP in WiFi client mode
+ESP32_STATION_IP = "192.168.4.1"  # ESP32 IP in WiFi client mode
 
 # Command-line argument parser
 parser = argparse.ArgumentParser(description='Script for interacting with ESP32')
